@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini AI Question Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.2
 // @description  Send webpage to Gemini AI to solve questions
 // @author       You
 // @match        *://*/*
@@ -14,10 +14,11 @@
     'use strict';
 
     let API_KEY = GM_getValue('gemini_api_key', '');
-    const API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+    const API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent';
 
-    let solveButton, retryButton, resultDiv, configButton;
+    let solveButton, retryButton, resultDiv, configButton, debugButton;
     let isProcessing = false;
+    let lastResponse = null;
 
     function createUI() {
         const container = document.createElement('div');
@@ -84,6 +85,22 @@
         `;
         retryButton.onclick = solveQuestion;
 
+        debugButton = document.createElement('button');
+        debugButton.textContent = 'Show Debug Info';
+        debugButton.style.cssText = `
+            background: #ff9800;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            width: 100%;
+            margin-bottom: 10px;
+            display: none;
+        `;
+        debugButton.onclick = showDebugInfo;
+
         resultDiv = document.createElement('div');
         resultDiv.id = 'gemini-result';
         resultDiv.style.cssText = `
@@ -94,7 +111,7 @@
             margin-top: 10px;
             font-size: 13px;
             line-height: 1.4;
-            max-height: 200px;
+            max-height: 300px;
             overflow-y: auto;
             display: none;
         `;
@@ -119,6 +136,7 @@
         container.appendChild(configButton);
         container.appendChild(solveButton);
         container.appendChild(retryButton);
+        container.appendChild(debugButton);
         container.appendChild(resultDiv);
 
         document.body.appendChild(container);
@@ -149,6 +167,19 @@
             container.children[0].style.display = 'block';
             container.dataset.minimized = 'true';
         }
+    }
+
+    function showDebugInfo() {
+        if (!lastResponse) {
+            showResult('No response data available', 'error');
+            return;
+        }
+
+        const debugInfo = `
+            <strong>Debug Information:</strong><br>
+            <pre style="font-size: 11px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">${JSON.stringify(lastResponse, null, 2)}</pre>
+        `;
+        showResult(debugInfo, 'info');
     }
 
     function showConfigModal() {
@@ -185,7 +216,7 @@
                 <button id="cancel-config" style="background: #666; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer;">Cancel</button>
             </div>
             <p style="font-size: 12px; color: #888; margin-top: 15px;">
-                Get your API key from: <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI Studio</a>
+                Get your API key from: <a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio</a>
             </p>
         `;
 
@@ -255,6 +286,7 @@
         solveButton.textContent = 'Processing...';
         solveButton.disabled = true;
         retryButton.style.display = 'none';
+        debugButton.style.display = 'none';
 
         const pageContent = getPageContent();
 
@@ -270,8 +302,26 @@ ${pageContent}`;
             }],
             generationConfig: {
                 temperature: 0.1,
-                maxOutputTokens: 100,
-            }
+                maxOutputTokens: 200,
+            },
+            safetySettings: [
+                {
+                    category: "HARM_CATEGORY_HARASSMENT",
+                    threshold: "BLOCK_NONE"
+                },
+                {
+                    category: "HARM_CATEGORY_HATE_SPEECH",
+                    threshold: "BLOCK_NONE"
+                },
+                {
+                    category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    threshold: "BLOCK_NONE"
+                },
+                {
+                    category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    threshold: "BLOCK_NONE"
+                }
+            ]
         };
 
         GM_xmlhttpRequest({
@@ -301,20 +351,85 @@ ${pageContent}`;
 
         try {
             const data = JSON.parse(response.responseText);
+            lastResponse = data;
 
-            if (response.status === 200 && data.candidates && data.candidates[0]) {
-                const answer = data.candidates[0].content.parts[0].text.trim();
-                showResult(`<strong>Answer:</strong> ${answer}`, 'success');
-            } else if (data.error) {
+            // Check for API errors first
+            if (data.error) {
                 showResult(`API Error: ${data.error.message}`, 'error');
                 retryButton.style.display = 'block';
+                debugButton.style.display = 'block';
+                return;
+            }
+
+            // Safely extract the answer with proper null/undefined checks
+            if (response.status === 200 &&
+                data.candidates &&
+                Array.isArray(data.candidates) &&
+                data.candidates.length > 0) {
+
+                const candidate = data.candidates[0];
+
+                // Check for content filtering
+                if (candidate.finishReason === 'SAFETY') {
+                    let safetyMsg = 'Response blocked by safety filters.';
+                    if (candidate.safetyRatings) {
+                        safetyMsg += '<br><small>Safety ratings: ' +
+                            JSON.stringify(candidate.safetyRatings) + '</small>';
+                    }
+                    showResult(safetyMsg, 'error');
+                    retryButton.style.display = 'block';
+                    debugButton.style.display = 'block';
+                    return;
+                }
+
+                // Check for other finish reasons
+                if (candidate.finishReason && candidate.finishReason !== 'STOP') {
+                    showResult(`Response finished with reason: ${candidate.finishReason}`, 'error');
+                    retryButton.style.display = 'block';
+                    debugButton.style.display = 'block';
+                    return;
+                }
+
+                // Check if content exists
+                if (!candidate.content) {
+                    showResult('No content in response. Try rewording or simplifying the question.', 'error');
+                    retryButton.style.display = 'block';
+                    debugButton.style.display = 'block';
+                    return;
+                }
+
+                // Check if parts exists and is an array
+                if (!candidate.content.parts ||
+                    !Array.isArray(candidate.content.parts) ||
+                    candidate.content.parts.length === 0) {
+                    showResult('No answer parts in response. The API may be blocking this content.', 'error');
+                    retryButton.style.display = 'block';
+                    debugButton.style.display = 'block';
+                    return;
+                }
+
+                // Check if text exists in the first part
+                const firstPart = candidate.content.parts[0];
+                if (!firstPart.text) {
+                    showResult('No text in response part. Try a different page or question.', 'error');
+                    retryButton.style.display = 'block';
+                    debugButton.style.display = 'block';
+                    return;
+                }
+
+                const answer = firstPart.text.trim();
+                showResult(`<strong>Answer:</strong> ${answer}`, 'success');
             } else {
-                showResult('No answer found in response', 'error');
+                showResult('Invalid response structure from API. Status: ' + response.status, 'error');
                 retryButton.style.display = 'block';
+                debugButton.style.display = 'block';
             }
         } catch (error) {
             showResult(`Error parsing response: ${error.message}`, 'error');
             retryButton.style.display = 'block';
+            debugButton.style.display = 'block';
+            console.error('Full error:', error);
+            console.error('Response text:', response.responseText);
         }
     }
 
@@ -324,6 +439,7 @@ ${pageContent}`;
         solveButton.disabled = false;
         showResult(message, 'error');
         retryButton.style.display = 'block';
+        debugButton.style.display = 'block';
     }
 
     function showResult(message, type) {
@@ -338,6 +454,10 @@ ${pageContent}`;
             resultDiv.style.background = '#ffeaea';
             resultDiv.style.borderColor = '#f44336';
             resultDiv.style.color = '#c62828';
+        } else if (type === 'info') {
+            resultDiv.style.background = '#e3f2fd';
+            resultDiv.style.borderColor = '#2196f3';
+            resultDiv.style.color = '#1565c0';
         }
     }
 
@@ -352,4 +472,3 @@ ${pageContent}`;
     init();
 
 })();
-
