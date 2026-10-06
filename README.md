@@ -1,6 +1,6 @@
 # AI Website Solver (Tampermonkey)
 
-A simple Tampermonkey userscript that solves websites directly in your browser (no need for chatgpt) - Was once used to help solve math problems in cerebry and different school sites
+A simple Tampermonkey userscript that solves the questions on websites and directly gives the answer in the browser without the need for opening separate tabs.
 
 ## Usage
 1. Install the [Tampermonkey](https://www.tampermonkey.net/) browser extension.  
